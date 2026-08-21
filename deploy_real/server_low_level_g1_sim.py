@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import time
 import numpy as np
@@ -10,6 +11,7 @@ from collections import deque
 import mujoco.viewer as mjv
 from tqdm import tqdm
 import os
+import tempfile
 from data_utils.rot_utils import quatToEuler
 
 try:
@@ -55,6 +57,19 @@ def load_onnx_policy(policy_path: str, device: str) -> OnnxPolicyWrapper:
     return OnnxPolicyWrapper(session, input_name)
 
 
+def _patch_xml_with_feet_weld(xml_path):
+    xml_dir = os.path.dirname(os.path.abspath(xml_path))
+    with open(xml_path, 'r') as f:
+        xml = f.read()
+    weld_block = '\n  <equality>\n    <weld name="pelvis_fixed" body1="pelvis" solref="0.01 1"/>\n  </equality>\n</mujoco>'
+    xml = xml.replace('</mujoco>', weld_block)
+    fd, tmp_path = tempfile.mkstemp(suffix='.xml', dir=xml_dir)
+    with os.fdopen(fd, 'w') as f:
+        f.write(xml)
+    print("[Fix Feet] Injected <weld> constraint: pelvis -> world")
+    return tmp_path
+
+
 class RealTimePolicyController:
     def __init__(self, 
                  xml_file, 
@@ -65,6 +80,7 @@ class RealTimePolicyController:
                  measure_fps=False,
                  limit_fps=True,
                  policy_frequency=50,
+                 fix_feet=False,
                  ):
         self.measure_fps = measure_fps
         self.limit_fps = limit_fps
@@ -77,8 +93,11 @@ class RealTimePolicyController:
 
         self.device = device
         self.policy = load_onnx_policy(policy_path, device)
+        self.fix_feet = fix_feet
 
         # Create MuJoCo sim
+        if self.fix_feet:
+            xml_file = _patch_xml_with_feet_weld(xml_file)
         self.model = mujoco.MjModel.from_xml_path(xml_file)
         self.model.opt.timestep = 0.001
         self.data = mujoco.MjData(self.model)
@@ -336,6 +355,8 @@ class RealTimePolicyController:
                     
                     self.last_action = raw_action
                     raw_action = np.clip(raw_action, -10., 10.)
+                    if self.fix_feet:
+                        raw_action[0:15] = 0.0
                     scaled_actions = raw_action * self.action_scale
                     pd_target = scaled_actions + self.default_dof_pos
 
@@ -405,7 +426,7 @@ def main():
     parser.add_argument('--policy', type=str, required=True,
                         help='Path to TWIST2 ONNX policy file')
     parser.add_argument('--device', type=str, 
-                        default='cuda',
+                        default='cpu',
                         help='Device to run policy on (cuda/cpu)')
     parser.add_argument('--record_video', action='store_true',
                         help='Record video of simulation')
@@ -414,6 +435,10 @@ def main():
     parser.add_argument("--measure_fps", help="Measure FPS", default=0, type=int)
     parser.add_argument("--limit_fps", help="Limit FPS with sleep", default=1, type=int)
     parser.add_argument("--policy_frequency", help="Policy frequency", default=100, type=int)
+    parser.add_argument("--fix_feet", action="store_true", default=False,
+                        help="Weld pelvis to world and zero leg+torso actions (arm-only sim)")
+    parser.add_argument("--redis_verify", action="store_true",
+                        help="Only check Redis for mimic_obs data and exit (no simulation)")
     args = parser.parse_args()
     
     # Verify policy file exists
@@ -425,6 +450,45 @@ def main():
     if not os.path.exists(args.xml):
         print(f"Error: XML file {args.xml} does not exist")
         return
+
+    # Redis verify mode: check data and exit
+    if args.redis_verify:
+        print(f"=== Redis mimic_obs verification ===")
+        try:
+            r = redis.Redis(host='localhost', port=6379, db=0)
+            r.ping()
+            print(f"Redis connected: localhost:6379")
+        except Exception as e:
+            print(f"Error: Redis not reachable ({e})")
+            return
+
+        key = "action_body_unitree_g1_with_hands"
+        # Poll 5 times at 200ms intervals, check if data changes
+        prev_md5 = None
+        print(f"\nKey: {key}")
+        print(f"{'Poll':>4s}  {'t_action':>14s}  {'md5':>32s}  {'arm[15:22]'}")
+        print("-" * 80)
+        for i in range(5):
+            raw = r.get(key)
+            ts = r.get("t_action")
+            ts_str = ts.decode() if ts else "N/A"
+            if raw:
+                data = json.loads(raw)
+                md5 = hashlib.md5(raw).hexdigest()
+                arm = [f"{data[j]:.3f}" for j in range(15, 22)] if len(data) >= 22 else ["?"]*7
+                changed = "CHANGED" if prev_md5 and md5 != prev_md5 else ("static" if i > 0 else "initial")
+                print(f"  {i+1:2d}  {ts_str:>14s}  {md5:>32s}  [{', '.join(arm)}]  {changed}")
+                prev_md5 = md5
+            else:
+                print(f"  {i+1:2d}  {ts_str:>14s}  {'(no data)':>32s}")
+            if i < 4:
+                time.sleep(0.2)
+        print("-" * 80)
+        if prev_md5:
+            print("=> mimic_obs EXISTS in Redis (static = VR arms not moving, CHANGED = data flowing)")
+        else:
+            print("=> mimic_obs NOT FOUND in Redis — is teleop.sh running?")
+        return
     
     print(f"Starting TWIST2 simulation controller...")
     print(f"  XML file: {args.xml}")
@@ -434,6 +498,7 @@ def main():
     print(f"  Record proprio: {args.record_proprio}")
     print(f"  Measure FPS: {args.measure_fps}")
     print(f"  Limit FPS: {args.limit_fps}")
+    print(f"  Fix Feet: {args.fix_feet}")
     controller = RealTimePolicyController(
         xml_file=args.xml,
         policy_path=args.policy,
@@ -443,6 +508,7 @@ def main():
         measure_fps=args.measure_fps,
         limit_fps=args.limit_fps,
         policy_frequency=args.policy_frequency,
+        fix_feet=args.fix_feet,
     )
     controller.run()
 
