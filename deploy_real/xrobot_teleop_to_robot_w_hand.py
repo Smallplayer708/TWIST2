@@ -50,6 +50,29 @@ from data_utils.params import DEFAULT_MIMIC_OBS, DEFAULT_HAND_POSE
 from data_utils.rot_utils import euler_from_quaternion_np, quat_diff_np, quat_rotate_inverse_np
 from data_utils.fps_monitor import FPSMonitor
 
+# Fixed lower-body standing pose for --fixed_lower_body.
+# qpos layout: [0:3] root xyz, [3:7] root quat (scalar-first),
+# [7:13] left leg, [13:19] right leg, [19:22] torso/waist,
+# [22:29] left arm, [29:36] right arm.
+DEFAULT_ROOT_HEIGHT = 0.8
+DEFAULT_ROOT_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
+DEFAULT_QPOS_LEGS_WAIST = np.array([
+    -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,   # left leg (6)
+    -0.2, 0.0, 0.0, 0.4, -0.2, 0.0,   # right leg (6)
+    0.0, 0.0, 0.0,                     # torso/waist (3)
+])
+DEFAULT_ARM_QPOS = np.array([
+    0.0, 0.4, 0.0, 1.2, 0.0, 0.0, 0.0,   # left arm (7)
+    0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0,  # right arm (7)
+])
+DEFAULT_FULL_QPOS = np.concatenate([
+    np.array([0.0, 0.0, DEFAULT_ROOT_HEIGHT]),
+    DEFAULT_ROOT_QUAT,
+    DEFAULT_QPOS_LEGS_WAIST,
+    DEFAULT_ARM_QPOS,
+])
+FIXED_ARM_POSE = np.array([0.0, 0.0, 0.0, 1.57, 0.0, 0.0, 0.0])
+
 def start_interpolation(state_machine, start_obs, end_obs, duration=1.0):
     """Start interpolation from start_obs to end_obs over given duration"""
     state_machine.is_interpolating = True
@@ -107,7 +130,7 @@ def extract_mimic_obs_whole_body(qpos, last_qpos, dt=1/30):
 
 
 class StateMachine:
-    def __init__(self, enable_smooth=False, smooth_window_size=5, use_pinch=False):
+    def __init__(self, enable_smooth=False, smooth_window_size=5, use_pinch=False, hand_step=0.05):
         """
         State process for teleoperation:
         idle -> teleop -> pause -> teleop ... -> idle -> exit
@@ -133,7 +156,7 @@ class StateMachine:
         self.hand_right_position = 0.0
         self.use_pinch = use_pinch
         # Hand control parameters
-        self.hand_movement_step = 0.05  # 5% movement per press/hold
+        self.hand_movement_step = hand_step  # fraction of full travel per press/hold
         
         # Velocity commands from joystick
         self.velocity_commands = np.array([0.0, 0.0, 0.0])  # [vx, vy, vyaw]
@@ -366,6 +389,12 @@ class XRobotTeleopToRobot:
         self.robot_name = args.robot
         self.xml_file = ROBOT_XML_DICT[args.robot]
         self.robot_base = ROBOT_BASE_DICT[args.robot]
+
+        # Fixed lower-body / fixed-arm / arm smoothing options
+        self.fixed_lower_body = args.fixed_lower_body
+        self.fixed_arm = args.fixed_arm
+        self.arm_smooth_alpha = args.arm_smooth_alpha
+        self.arm_ema = None
         
         print(f"Pinch mode: {self.args.pinch_mode}")
         # Initialize state tracking
@@ -383,7 +412,8 @@ class XRobotTeleopToRobot:
         self.state_machine = StateMachine(
             enable_smooth=args.smooth,
             smooth_window_size=args.smooth_window_size,
-            use_pinch=args.pinch_mode
+            use_pinch=args.pinch_mode,
+            hand_step=args.hand_step,
         )
         self.rate = None
         
@@ -420,8 +450,9 @@ class XRobotTeleopToRobot:
             src_human="xrobot",
             tgt_robot="unitree_g1",
             actual_human_height=self.args.actual_human_height,
+            damping=self.args.retarget_damping,
         )
-        print("Retargeting system initialized")
+        print(f"Retargeting system initialized (damping={self.args.retarget_damping})")
     
     def setup_mujoco_simulation(self):
         """Setup MuJoCo model and data"""
@@ -455,6 +486,38 @@ class XRobotTeleopToRobot:
             return self.teleop_data_streamer.get_current_frame()
         return None, None, None, None, None
         
+    def _apply_lower_body_lock(self, qpos):
+        """Lock root pose + legs/waist to standing pose (teleop arms only)."""
+        if not self.fixed_lower_body:
+            return qpos
+        qpos[0:3] = [0.0, 0.0, DEFAULT_ROOT_HEIGHT]
+        qpos[3:7] = DEFAULT_ROOT_QUAT
+        qpos[7:22] = DEFAULT_QPOS_LEGS_WAIST
+        return qpos
+
+    def _apply_fixed_arm(self, qpos):
+        """Override the specified arm with a fixed home pose."""
+        if self.fixed_arm == "none":
+            return qpos
+        if self.fixed_arm in ("left", "both"):
+            qpos[22:29] = FIXED_ARM_POSE
+        if self.fixed_arm in ("right", "both"):
+            qpos[29:36] = FIXED_ARM_POSE
+        return qpos
+
+    def _apply_arm_smoothing(self, qpos):
+        """First-order EMA low-pass on the arm segment qpos[22:36]."""
+        if self.arm_smooth_alpha <= 0.0:
+            return qpos
+        arm = qpos[22:36].copy()
+        if self.arm_ema is None:
+            self.arm_ema = arm
+        else:
+            self.arm_ema = (self.arm_smooth_alpha * arm
+                            + (1.0 - self.arm_smooth_alpha) * self.arm_ema)
+        qpos[22:36] = self.arm_ema
+        return qpos
+
     def process_retargeting(self, smplx_data):
         """Process motion retargeting and return observations"""
         if smplx_data is None or self.retarget is None:
@@ -466,7 +529,12 @@ class XRobotTeleopToRobot:
         self.last_time = current_time
         
         # Retarget till convergence
-        qpos = self.retarget.retarget(smplx_data, offset_to_ground=True)
+        qpos = self.retarget.retarget(smplx_data, offset_to_ground=True).copy()
+        
+        # Apply fixed lower-body / fixed-arm / arm smoothing overrides
+        qpos = self._apply_lower_body_lock(qpos)
+        qpos = self._apply_fixed_arm(qpos)
+        qpos = self._apply_arm_smoothing(qpos)
         
         # Create mimic obs from retargeting
         if self.last_qpos is not None:
@@ -535,6 +603,7 @@ class XRobotTeleopToRobot:
         """Handle entering teleop state"""
         if previous_state in ["idle", "pause"]:
             self.state_machine.reset_smooth_history()
+            self.arm_ema = None
             print("Reset smooth history on entering teleop")
 
         if previous_state == "idle":
@@ -709,6 +778,11 @@ class XRobotTeleopToRobot:
             print(f"- Smooth filtering: ENABLED (window size: {self.state_machine.smooth_window_size} frames)")
         else:
             print("- Smooth filtering: DISABLED")
+
+        print(f"- Fixed lower body: {'ENABLED' if self.fixed_lower_body else 'DISABLED'}")
+        print(f"- Fixed arm: {self.fixed_arm}")
+        print(f"- Arm smoothing alpha: {self.arm_smooth_alpha}")
+        print(f"- Hand step: {self.state_machine.hand_movement_step}")
         
         if self.fps_monitor.enable_detailed_stats:
             print(f"- FPS measurement: ENABLED (detailed stats every {self.fps_monitor.detailed_print_interval} steps)")
@@ -803,7 +877,14 @@ def parse_arguments():
         type=float,
         default=1.5,
         help="Actual human height for retargeting.",
-    )   
+    )
+    parser.add_argument(
+        "--retarget_damping",
+        type=float,
+        default=5e-1,
+        help="GMR IK damping. Fork default is 5e-1 (0.5, smooth but sluggish); "
+             "upstream GMR ~1e-1. Lower = faster/sharper leg tracking, try 1e-1 or 1e-2.",
+    )
     parser.add_argument(
         "--neck_retarget_scale",
         type=float,
@@ -832,6 +913,30 @@ def parse_arguments():
         type=int,
         default=0,
         help="Measure and print detailed FPS statistics (0=disabled, 1=enabled).",
+    )
+    parser.add_argument(
+        "--fixed_lower_body",
+        action="store_true",
+        help="Lock root pose and legs/waist to standing pose; teleop only the arms.",
+    )
+    parser.add_argument(
+        "--fixed_arm",
+        type=str,
+        choices=["left", "right", "both", "none"],
+        default="none",
+        help="Override the specified arm with a fixed home pose (left/right/both/none).",
+    )
+    parser.add_argument(
+        "--arm_smooth_alpha",
+        type=float,
+        default=0.0,
+        help="First-order EMA smoothing factor for the arm segment qpos[22:36] (0=off).",
+    )
+    parser.add_argument(
+        "--hand_step",
+        type=float,
+        default=0.05,
+        help="Hand open/close step per frame, fraction of full travel (0~1).",
     )
     return parser.parse_args()
 
