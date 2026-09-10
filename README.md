@@ -21,10 +21,49 @@ By Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo Kanazawa†, Rocky Duan†, Piet
 
 
 
+# 本仓库改动与模式切换
+
+本 fork 在官方 TWIST2 基础上合并了两套改动，并用 `--mode` 一键切换。
+
+## 项目内容
+
+| 来源 | 改动 |
+|---|---|
+| Smallplayer708/TWIST2（fix_feet 系列） | `--fix_feet`（焊死 pelvis→world + 腿/躯干动作置零）、`--redis_verify`、`--fixed_lower_body`、`--fixed_arm`、`--arm_smooth_alpha`、`--hand_step` |
+| 本地腿部跟踪改进 | `--leg_pd_gain`、`--leg_ema_alpha`、`--render_interval`、`--yaw_gain`、`--xy_gain`、`--leg_smooth_alpha`、朝向对齐、`--retarget_damping`、solver→Newton（详见 `doc/LEG_TRACKING_IMPROVEMENTS.md`） |
+| 对比工具 | `deploy_real/compare_tools/`（遥操作 vs sim2sim 状态发布到 Redis 对比）、`run_bridge.sh` |
+
+## 使用方法
+
+```bash
+# sim2sim（仿真侧）
+bash sim2sim.sh                 # free：原版 100Hz
+bash sim2sim.sh --mode fix_feet # 锁腿双臂（100Hz）
+bash sim2sim.sh --mode tuned    # 腿部改进（50Hz + leg_pd_gain + ema）
+
+# teleop（遥操作侧）
+bash teleop.sh                 # free：原版
+bash teleop.sh --mode fix_feet # 锁下肢仅手臂
+bash teleop.sh --mode tuned    # 腿部改进（damping 1e-1 + yaw_gain + leg_smooth）
+```
+
+完整「双臂锁腿」链路需两侧同时开启：
+
+```bash
+bash teleop.sh --mode fix_feet   # 终端 1
+bash sim2sim.sh --mode fix_feet  # 终端 2
+```
+
+其余参数（如 `--device`、`--leg_pd_gain`）可直接透传覆盖，例如
+`bash sim2sim.sh --mode tuned --leg_pd_gain 2.5`。
+
+---
+
 # Content Table
 
 - [Installation](#installation)
 - [Usage](#usage)
+- [本仓库改动与模式切换](#本仓库改动与模式切换)
 - [Citation and Contact](#citation-and-contact)
 
 
@@ -215,6 +254,7 @@ Then, you can run the low-level controller server in simulation.
 ```bash
 bash sim2sim.sh
 ```
+- 可选 `--mode free|fix_feet|tuned` 切换模式，见[本仓库改动与模式切换](#本仓库改动与模式切换)。
 - This will start a simulation that runs the low-level controller only.
 - This is because we separate the high-level control (i.e., teleop) from the low-level control (i.e., RL policy).
 - You should now be able to see the robot stand still. The robot is standing still because we make redis server send stand pose by default.
@@ -245,6 +285,7 @@ bash run_motion_server.sh
 ```bash
 bash teleop.sh
 ```
+- 可选 `--mode free|fix_feet|tuned` 切换模式，见[本仓库改动与模式切换](#本仓库改动与模式切换)。
 
 
 

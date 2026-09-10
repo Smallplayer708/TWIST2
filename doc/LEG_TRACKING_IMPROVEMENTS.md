@@ -349,3 +349,108 @@ AMP 用判别器区分"专家状态分布"与"policy rollout 分布"，奖励 `-
 > 关键判断：抖动 + 跟踪差主要来自**蒸馏信息损失 + 平滑正则弱 + PD 增益不足 + 参考噪声**，
 > 而非"动作风格"。实时遥操作下只能在**因果**框架内优化，
 > 优先走输出侧平滑（A/C）与重训平滑正则（D），而不是 AMP 或任何依赖未来的方案。
+
+---
+
+## 5. 已合并的 fix_feet 模式与 --mode 切换（改动清单）
+
+本文方案 A/C/D 之外，本仓库还把 Smallplayer708/TWIST2 的 `fix_feet`（锁腿双臂）
+模式合并了进来，并用 `--mode` 实现一键切换（提交 `65f82a7`）。
+
+### 5.1 改动清单
+
+#### 从 Smallplayer708/TWIST2 合并（fix_feet 系列）
+
+| 文件 | 新增 |
+|---|---|
+| `deploy_real/server_low_level_g1_sim.py` | `--fix_feet`（`_patch_xml_with_feet_weld()` 焊死 pelvis→world + 每步 `raw_action[0:15]=0`）、`--redis_verify` |
+| `deploy_real/xrobot_teleop_to_robot_w_hand.py` | `--fixed_lower_body`、`--fixed_arm`、`--arm_smooth_alpha`、`--hand_step` |
+| `sim2sim.sh` / `teleop.sh` | `conda activate gmr`、`set -euo pipefail` |
+
+#### 本地腿部改进（本文主体）
+
+| 文件 | 新增 |
+|---|---|
+| `deploy_real/server_low_level_g1_sim.py` | `--leg_pd_gain`、`--leg_ema_alpha`、`--render_interval`、sim2sim 状态发布 |
+| `deploy_real/xrobot_teleop_to_robot_w_hand.py` | 朝向对齐 `facing_yaw`、`--yaw_gain`、`--xy_gain`、`--leg_smooth_alpha`、`publish_compare_state` |
+| `assets/g1/g1_sim2sim_29dof.xml` | solver `PGS` → `Newton` |
+| `legged_gym/.../g1_mimic_future_config.py` | `dof_acc`/`action_rate`/`ankle_dof_acc`/`tracking_feet_height` 强化 |
+| 新文件 | `run_bridge.sh`、`deploy_real/compare_tools/`、`sim2sim_g1.xml`、`teleop_g1.xml`、`compare_dual.xml` |
+
+#### 冲突解决要点
+
+| 文件 | 冲突 | 解决 |
+|---|---|---|
+| `xrobot_teleop_to_robot_w_hand.py` | `--retarget_damping` 重复定义（origin 5e-1 / 本地 1e-1） | 合并为单参数，默认 5e-1，`tuned` 模式显式传 1e-1 |
+| `xrobot_teleop_to_robot_w_hand.py` | `process_retargeting` 签名 vs 新增 helper 方法 | 保留 helper + `headset_data=None`；`retarget(..., root_yaw=root_yaw).copy()` 后套用锁定/固定臂/臂平滑 |
+| `sim2sim.sh` | `--policy_frequency`（origin 100 / 本地 50） | 由 `--mode` 分支决定 |
+| `server_low_level_g1_sim.py` | `__init__`/`main()` 参数集不同 | 全部合并（`fix_feet` + `leg_*` + `render_interval`） |
+
+### 5.2 使用方法
+
+#### sim2sim（仿真侧）
+
+| mode | policy_frequency | 实际传入参数 | 用途 |
+|---|---|---|---|
+| `free` | 100 | （无） | 原版自由模式 |
+| `fix_feet` | 100 | `--fix_feet` | 双臂遥操作（下肢焊死） |
+| `tuned` | 50 | `--render_interval 2 --leg_pd_gain 2.0 --leg_ema_alpha 0.6` | 腿部跟踪改进 |
+
+```bash
+bash sim2sim.sh                # free
+bash sim2sim.sh --mode fix_feet
+bash sim2sim.sh --mode tuned
+```
+
+#### teleop（遥操作侧）
+
+| mode | 实际传入参数 | 用途 |
+|---|---|---|
+| `free` | `--hand_step 0.02`（damping 默认 5e-1） | 原版 |
+| `fix_feet` | `--fixed_lower_body` | 锁下肢双臂遥操作 |
+| `tuned` | `--retarget_damping 1.0e-1 --yaw_gain 1.5 --leg_smooth_alpha 0.8` | 腿部改进 |
+
+```bash
+bash teleop.sh                # free
+bash teleop.sh --mode fix_feet
+bash teleop.sh --mode tuned
+```
+
+#### 完整「双臂锁腿」链路
+
+`fix_feet` 分两层（遥操作锁下肢 + 仿真焊 pelvis），需两侧同时开启：
+
+```bash
+bash teleop.sh --mode fix_feet   # 终端 1
+bash sim2sim.sh --mode fix_feet  # 终端 2
+```
+
+其余参数可透传覆盖，例如 `bash sim2sim.sh --mode tuned --leg_pd_gain 2.5`。
+
+### 5.3 实施步骤（已执行）
+
+```bash
+# 1) 提交本地未提交改动（排除视频/.kilo 等）
+git add assets/g1/g1_sim2sim_29dof.xml deploy_real/server_low_level_g1_sim.py \
+        deploy_real/xrobot_teleop_to_robot_w_hand.py \
+        legged_gym/legged_gym/envs/g1/g1_mimic_future_config.py \
+        sim2sim.sh teleop.sh assets/g1/compare_dual.xml assets/g1/sim2sim_g1.xml \
+        assets/g1/teleop_g1.xml deploy_real/compare_tools/ \
+        doc/LEG_TRACKING_IMPROVEMENTS.md run_bridge.sh
+git commit -m "Improve leg tracking and add teleop/sim2sim comparison tooling"
+
+# 2) 合并 origin/master（fix_feet 特性）
+git merge origin/master --no-edit
+#    → 4 个文件冲突，手动解决后：
+git add deploy_real/server_low_level_g1_sim.py \
+        deploy_real/xrobot_teleop_to_robot_w_hand.py sim2sim.sh teleop.sh
+git commit -m "Merge origin/master ... and add --mode switching"
+
+# 3) 语法自检
+bash -n sim2sim.sh && bash -n teleop.sh
+python -m py_compile deploy_real/server_low_level_g1_sim.py
+python -m py_compile deploy_real/xrobot_teleop_to_robot_w_hand.py
+
+# 4) 推送（需先配好 GitHub 认证）
+git push origin master
+```
