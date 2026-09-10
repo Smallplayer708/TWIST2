@@ -1,0 +1,4 @@
+<mujoco model="compare">
+  <include file="teleop_g1.xml"/>
+  <include file="sim2sim_g1.xml"/>
+</mujoco>

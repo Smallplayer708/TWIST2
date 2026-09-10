@@ -39,6 +39,7 @@ from general_motion_retargeting import GeneralMotionRetargeting as GMR
 from general_motion_retargeting import draw_frame
 from general_motion_retargeting import ROBOT_XML_DICT, ROBOT_BASE_DICT
 from general_motion_retargeting import human_head_to_robot_neck
+from general_motion_retargeting.xrobot_utils import facing_yaw
 from rich import print
 from tqdm import tqdm
 import cv2
@@ -373,6 +374,11 @@ class XRobotTeleopToRobot:
         self.last_time = time.time()
         self.target_fps = args.target_fps
         self.measured_dt = 1/ self.target_fps # default fallback dt
+        self.prev_root_yaw = None
+        self.yaw_gain = args.yaw_gain
+        self.xy_gain = args.xy_gain
+        self.leg_smooth_alpha = args.leg_smooth_alpha
+        self._last_mimic_smoothed = None
 
         # Initialize components
         self.teleop_data_streamer = None
@@ -420,8 +426,9 @@ class XRobotTeleopToRobot:
             src_human="xrobot",
             tgt_robot="unitree_g1",
             actual_human_height=self.args.actual_human_height,
+            damping=self.args.retarget_damping,
         )
-        print("Retargeting system initialized")
+        print(f"Retargeting system initialized (damping={self.args.retarget_damping})")
     
     def setup_mujoco_simulation(self):
         """Setup MuJoCo model and data"""
@@ -455,7 +462,7 @@ class XRobotTeleopToRobot:
             return self.teleop_data_streamer.get_current_frame()
         return None, None, None, None, None
         
-    def process_retargeting(self, smplx_data):
+    def process_retargeting(self, smplx_data, headset_data=None):
         """Process motion retargeting and return observations"""
         if smplx_data is None or self.retarget is None:
             return None, None
@@ -465,15 +472,59 @@ class XRobotTeleopToRobot:
         self.measured_dt = current_time - self.last_time
         self.last_time = current_time
         
+        # Root yaw alignment: robot model-forward (+x) follows the operator's facing,
+        # so root yaw tracks 1:1 instead of lagging behind the incremental IK solve.
+        root_yaw = None
+        if headset_data is not None and len(headset_data) >= 7:
+            try:
+                root_yaw = facing_yaw(headset_data, smplx_data, prev_yaw=self.prev_root_yaw)
+                self.prev_root_yaw = root_yaw
+            except Exception:
+                root_yaw = None
+        
         # Retarget till convergence
-        qpos = self.retarget.retarget(smplx_data, offset_to_ground=True)
+        qpos = self.retarget.retarget(smplx_data, offset_to_ground=True, root_yaw=root_yaw)
         
         # Create mimic obs from retargeting
         if self.last_qpos is not None:
             current_retarget_obs = extract_mimic_obs_whole_body(qpos, self.last_qpos, dt=self.measured_dt)
         else:
             current_retarget_obs = DEFAULT_MIMIC_OBS[self.robot_name]
-        
+
+        # Leg/reference smoothing: GMR incremental IK adds per-frame noise to the
+        # leg joints and root velocities; feeding it raw into the policy causes
+        # visible leg jitter in sim2sim. EMA the root section (0:6) and leg
+        # joints (6:18) only — arms stay raw for latency.
+        if self.leg_smooth_alpha > 0.0:
+            current_retarget_obs = current_retarget_obs.copy()
+            if self._last_mimic_smoothed is None:
+                self._last_mimic_smoothed = current_retarget_obs.copy()
+            a = self.leg_smooth_alpha
+            mask = np.zeros(35, dtype=bool)
+            mask[0:6] = True    # root: vx, vy, z, roll, pitch, yaw_vel
+            mask[6:18] = True   # 12 leg joints
+            current_retarget_obs[mask] = (
+                a * current_retarget_obs[mask]
+                + (1.0 - a) * self._last_mimic_smoothed[mask]
+            )
+            self._last_mimic_smoothed[mask] = current_retarget_obs[mask]
+
+        # Yaw gain compensation: the policy executes ~0.6 of the commanded yaw
+        # angular velocity in MuJoCo (soft-contact decay), so we pre-amplify
+        # mimic_obs[5] (yaw ang vel) to make turning track 1:1.
+        if self.yaw_gain != 1.0:
+            current_retarget_obs = current_retarget_obs.copy()
+            current_retarget_obs[5] *= self.yaw_gain
+
+        # XY gain compensation: forward/lateral velocity reference (mimic_obs[0:2])
+        # is executed at only ~0.2 (policy prioritizes dof tracking when the GMR
+        # reference velocity is inconsistent with the leg reference), so we
+        # pre-amplify it to make walking actually advance ("marching in place"
+        # fix). Try 2.0~4.0.
+        if self.xy_gain != 1.0:
+            current_retarget_obs = current_retarget_obs.copy()
+            current_retarget_obs[0:2] *= self.xy_gain
+
         self.last_qpos = qpos.copy()
         return qpos, current_retarget_obs
         
@@ -652,6 +703,26 @@ class XRobotTeleopToRobot:
                 f"controller_data", 
                 json.dumps(controller_data)
             )
+
+    def publish_compare_state(self, qpos):
+        """Publish full robot state (root pose, 29 joints, ankle keypoints) to Redis
+        for the teleop-vs-sim2sim comparison tool. Key: compare_teleop_state."""
+        if self.redis_client is None or qpos is None:
+            return
+        try:
+            self.data.qpos[:] = qpos
+            mj.mj_forward(self.model, self.data)
+            state = {
+                "t_ms": int(time.time() * 1000),
+                "root_xyz": self.data.qpos[0:3].tolist(),
+                "root_quat": self.data.qpos[3:7].tolist(),
+                "dof_pos": self.data.qpos[7:36].tolist(),
+                "ankle_left_xyz": self.data.body("left_ankle_roll_link").xpos.tolist(),
+                "ankle_right_xyz": self.data.body("right_ankle_roll_link").xpos.tolist(),
+            }
+            self.redis_client.set("compare_teleop_state", json.dumps(state))
+        except Exception as e:
+            print(f"[compare] teleop state publish failed: {e}")
             
             
     def record_video_frame(self, viewer):
@@ -748,8 +819,9 @@ class XRobotTeleopToRobot:
                 # Process retargeting if we have data
                 qpos, current_retarget_obs = None, None
                 if smplx_data is not None:
-                    qpos, current_retarget_obs = self.process_retargeting(smplx_data)
+                    qpos, current_retarget_obs = self.process_retargeting(smplx_data, headset_data)
                     self.update_visualization(qpos, smplx_data, viewer)
+                    self.publish_compare_state(qpos)
                 
                 # Handle state transitions
                 self.handle_state_transitions(current_retarget_obs)
@@ -804,6 +876,36 @@ def parse_arguments():
         default=1.5,
         help="Actual human height for retargeting.",
     )   
+    parser.add_argument(
+        "--retarget_damping",
+        type=float,
+        default=1e-1,
+        help="GMR IK damping (default 1e-1, was 5e-1 upstream: slower root/leg tracking "
+             "causes turning to lag ~half and walking imbalance). Lower = faster/sharper.",
+    )
+    parser.add_argument(
+        "--yaw_gain",
+        type=float,
+        default=1.0,
+        help="Pre-amplify mimic_obs yaw angular velocity (dim 5) to compensate the "
+             "policy's ~0.6 yaw execution gain in MuJoCo. 1.67 = 1/0.6 for 1:1 turning.",
+    )
+    parser.add_argument(
+        "--xy_gain",
+        type=float,
+        default=1.0,
+        help="Pre-amplify mimic_obs xy velocity (dim 0:2) to compensate the "
+             "policy's ~0.2 forward-velocity execution gain in MuJoCo "
+             "(\"marching in place\"). Try 2.0~4.0.",
+    )
+    parser.add_argument(
+        "--leg_smooth_alpha",
+        type=float,
+        default=0.0,
+        help="EMA low-pass on mimic root section (0:6) and leg joints (6:18) to "
+             "remove GMR incremental-IK noise that causes leg jitter in sim2sim. "
+             "0=off; 0.5~0.7 recommended when legs jitter.",
+    )
     parser.add_argument(
         "--neck_retarget_scale",
         type=float,

@@ -65,9 +65,13 @@ class RealTimePolicyController:
                  measure_fps=False,
                  limit_fps=True,
                  policy_frequency=50,
+                 render_interval=2,
+                 leg_pd_gain=1.0,
+                 leg_ema_alpha=0.0,
                  ):
         self.measure_fps = measure_fps
         self.limit_fps = limit_fps
+        self.render_interval = render_interval
         self.redis_client = None
         try:
             self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
@@ -109,6 +113,8 @@ class RealTimePolicyController:
                 0.0, -0.4, 0.0, 1.2, 0.0, 0.0, 0.0, # right arm (7)
             ])
 
+        self.last_pd_target = self.default_dof_pos.copy()
+
         self.mujoco_default_dof_pos = np.concatenate([
             np.array([0, 0, 0.793]),
             np.array([1, 0, 0, 0]),
@@ -134,6 +140,19 @@ class RealTimePolicyController:
                 5, 5, 5, 5, 0.2, 0.2, 0.2,
                 5, 5, 5, 5, 0.2, 0.2, 0.2,
             ])
+
+        # Compensate the MuJoCo-soft-contact execution decay on the loaded legs:
+        # open-loop tests showed leg tracking RMSE 6.45 -> 4.38 deg at gain 2.0.
+        # Arms are unchanged (no ground contact, tracking is already good).
+        self.leg_pd_gain = leg_pd_gain
+        self.leg_ema_alpha = leg_ema_alpha
+        leg_idx = list(range(12))
+        self.stiffness[leg_idx] *= self.leg_pd_gain
+        self.damping[leg_idx] *= self.leg_pd_gain
+        print(f"[PD] leg stiffness/damping scaled x{self.leg_pd_gain}: "
+              f"hip {self.stiffness[0]:.0f}/{self.damping[0]:.1f}, "
+              f"knee {self.stiffness[3]:.0f}/{self.damping[3]:.1f}, "
+              f"ankle {self.stiffness[4]:.0f}/{self.damping[4]:.1f}")
 
         
         self.torque_limits = np.array([
@@ -265,6 +284,21 @@ class RealTimePolicyController:
                     self.redis_pipeline.set("state_hand_right_unitree_g1_with_hands", json.dumps(np.zeros(7).tolist()))
                     self.redis_pipeline.set("state_neck_unitree_g1_with_hands", json.dumps(np.zeros(2).tolist()))
                     self.redis_pipeline.set("t_state", int(time.time() * 1000)) # current timestamp in ms
+
+                    # Publish full state for the teleop-vs-sim2sim comparison tool
+                    try:
+                        compare_state = {
+                            "t_ms": int(time.time() * 1000),
+                            "root_xyz": self.data.qpos[0:3].tolist(),
+                            "root_quat": self.data.qpos[3:7].tolist(),
+                            "dof_pos": dof_pos.tolist(),
+                            "ankle_left_xyz": self.data.body("left_ankle_roll_link").xpos.tolist(),
+                            "ankle_right_xyz": self.data.body("right_ankle_roll_link").xpos.tolist(),
+                        }
+                        self.redis_pipeline.set("compare_sim2sim_state", json.dumps(compare_state))
+                    except Exception as e:
+                        print(f"[compare] sim2sim state publish failed: {e}")
+
                     self.redis_pipeline.execute()
 
                     # Get mimic obs from Redis
@@ -339,12 +373,22 @@ class RealTimePolicyController:
                     scaled_actions = raw_action * self.action_scale
                     pd_target = scaled_actions + self.default_dof_pos
 
+                    # Leg PD target low-pass (EMA): attenuate high-freq jitter on
+                    # the 12 leg joints while leaving arms/waist untouched.
+                    if self.leg_ema_alpha > 0.0:
+                        pd_target[0:12] = (self.leg_ema_alpha * self.last_pd_target[0:12]
+                                           + (1.0 - self.leg_ema_alpha) * pd_target[0:12])
+                    self.last_pd_target = pd_target
+
                     # self.redis_client.set("action_low_level_unitree_g1", json.dumps(raw_action.tolist()))
                     
-                    # Update camera to follow pelvis
-                    pelvis_pos = self.data.xpos[self.model.body("pelvis").id]
-                    self.viewer.cam.lookat = pelvis_pos
-                    self.viewer.sync()
+                    # Update camera to follow pelvis. Render every render_interval
+                    # policy steps (viewer.sync ~4ms; rendering every step would
+                    # eat the 50Hz control budget, never rendering looks frozen).
+                    if self.render_interval > 0 and i % int(self.sim_decimation * self.render_interval) == 0:
+                        pelvis_pos = self.data.xpos[self.model.body("pelvis").id]
+                        self.viewer.cam.lookat = pelvis_pos
+                        self.viewer.sync()
                     
                     if mp4_writer is not None:
                         img = self.viewer.read_pixels()
@@ -413,7 +457,10 @@ def main():
                         help='Record proprioceptive data')
     parser.add_argument("--measure_fps", help="Measure FPS", default=0, type=int)
     parser.add_argument("--limit_fps", help="Limit FPS with sleep", default=1, type=int)
-    parser.add_argument("--policy_frequency", help="Policy frequency", default=100, type=int)
+    parser.add_argument("--policy_frequency", help="Policy frequency (train=50Hz: dt=0.002*decimation=10)", default=50, type=int)
+    parser.add_argument("--render_interval", help="Render every N policy steps (2=25Hz visual, 1=50Hz visual, 0=never). Higher = less control jitter", default=2, type=int)
+    parser.add_argument("--leg_pd_gain", help="Scale leg (12 joints) stiffness+damping to compensate MuJoCo soft-contact decay (2.0 recommended)", default=1.0, type=float)
+    parser.add_argument("--leg_ema_alpha", help="EMA smoothing factor for leg (12 joints) PD targets (0=off, 0.5~0.7 recommended)", default=0.0, type=float)
     args = parser.parse_args()
     
     # Verify policy file exists
@@ -443,6 +490,9 @@ def main():
         measure_fps=args.measure_fps,
         limit_fps=args.limit_fps,
         policy_frequency=args.policy_frequency,
+        render_interval=args.render_interval,
+        leg_pd_gain=args.leg_pd_gain,
+        leg_ema_alpha=args.leg_ema_alpha,
     )
     controller.run()
 

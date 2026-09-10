@@ -16,5 +16,8 @@ python xrobot_teleop_to_robot_w_hand.py --robot unitree_g1 \
              --redis_ip $redis_ip \
              --target_fps 100 \
              --measure_fps 1 \
+             --yaw_gain 1.5\
+             --leg_smooth_alpha 0.8 \
+             --retarget_damping 1.0e-1
             #  --smooth \
             #  --pinch_mode
