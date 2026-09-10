@@ -454,3 +454,120 @@ python -m py_compile deploy_real/xrobot_teleop_to_robot_w_hand.py
 # 4) 推送（需先配好 GitHub 认证）
 git push origin master
 ```
+
+---
+
+## 6. 真机双臂桥接（g1_teleop_handoff）
+
+`fix_feet` 模式在仿真里只是「焊死下肢 + 锁腿/腰」。要把它接到真机，让策略直接驱动
+Unitree G1 的双臂，本仓库新增了 `--arm_sink` 桥接：把策略推理出的 29D `pd_target`
+中的双臂段 `pd_target[15:29]`（14D 绝对关节角，rad）转交给
+`g1_teleop_handoff`（`/home/user/g1_teleop_handoff`）的 `G1ArmController`，由其经
+`rt/arm_sdk`（DDS）以 250Hz 发布到真机。
+
+> 说明：g1_teleop_handoff 是一个独立的 14D 双臂 handoff 项目，定义「遥操作侧只输出
+> 14D `q_target`，不要自行建 `rt/arm_sdk` Publisher」的接口约定。本仓库只负责把策略输出
+> 转成 14D 喂给它，完整接口/安全约束见其 README（尤其 §2、§4、§7、§8）。
+
+### 6.1 本仓库新增改动（`--arm_sink` 系列）
+
+| 文件 | 新增 |
+|---|---|
+| `deploy_real/server_low_level_g1_sim.py` | `--arm_pd_gain`（臂 14 关节 stiffness/damping/torque limit 缩放）、`--arm_sink {mock,real}`、`--arm_iface`；推理后 `self.arm_sink.send(pd_target)`；`try/finally` 保证 `stop()` 释放 |
+| `assets/g1/g1_sim2sim_29dof.xml` | 补 `waist_pitch` 与 6 个腕关节的 `armature`；`left_wrist_pitch/yaw` 的 `actuatorfrcrange` 从 ±5 改 ±25（与右臂对称） |
+| `sim2sim.sh` | `fix_feet` 模式默认追加 `--arm_pd_gain 2.5` |
+
+### 6.2 数据流
+
+```text
+PICO 头显/手柄
+  ▼
+终端1: teleop.sh --mode fix_feet     (gmr 环境)
+  PICO → retarget → mimic_obs(35D)
+  (--mode fix_feet 在 retarget 侧锁 root/腿/腰到站姿)
+  └─→ Redis (localhost:6379)
+        ▼
+终端2: server_low_level_g1_sim.py    (gmr 环境 + unitree_sdk2py)
+  读 Redis → ONNX 策略 → raw_action[29]
+  → fix_feet: raw_action[0:15] = 0
+  → pd_target = raw_action * 0.5 + default_dof_pos
+  → MuJoCo PD 步进（proprio 反馈闭环，仿真侧）
+  → arm_sink.send(pd_target)
+       ▼ 切 pd_target[15:29] → 限位钳位 → 去重
+  Twist2ArmSink → G1ArmController('enp4s0')
+       ▼ 250Hz 控制环 / 速度限幅 / CRC / arm_weight 平滑 takeover
+  rt/arm_sdk (DDS) → G1 真机 (192.168.123.164)
+```
+
+29D `pd_target` 关节顺序：`0..11` 双腿、`12..14` 腰（fix_feet 下恒为 default）、
+`15..21` 左臂 7DoF、`22..28` 右臂 7DoF。因此 `pd_target[15:29]` 与
+`set_arm_q()` 的 14D 顺序**恒等映射，无需重排**，单位同为 rad 绝对角。
+
+### 6.3 前置条件
+
+- g1_teleop_handoff 位于 `/home/user/g1_teleop_handoff`（`server_low_level_g1_sim.py`
+  硬编码 `sys.path.insert(0, '/home/user/g1_teleop_handoff')`，换位置需同步改）。
+- `gmr` 环境追加真机 SDK：`unitree_sdk2py==1.0.1`、`cyclonedds==0.10.2`
+  （从 unitree_sdk2_python 官方仓库 `pip install -e .`，勿盲装 PyPI 版本）。
+- 真机臂控模式就绪：本项目机实测 `R2+A` → `fsm_id=802`；网线连通
+  （参考 `enp4s0` / PC `192.168.123.200` / G1 `192.168.123.164`，换机器必须重确认）。
+
+### 6.4 启动步骤
+
+```bash
+# 0) 真机预检（每次上电必做）
+cd /home/user/g1_teleop_handoff
+./scripts/start_g1_check.sh enp4s0 192.168.123.164
+
+# 1) 终端 1：PICO 遥操作 retarget（锁下肢仅手臂）
+cd /home/user/TWIST2 && conda activate gmr
+bash teleop.sh --mode fix_feet
+
+# 2) 终端 2：sim2sim 策略 + 真机桥接
+cd /home/user/TWIST2 && conda activate gmr
+# 先 mock 联调（无真机）：
+python deploy_real/server_low_level_g1_sim.py \
+  --xml assets/g1/g1_sim2sim_29dof.xml \
+  --policy assets/ckpts/twist2_1017_20k.onnx \
+  --device cpu --fix_feet --arm_pd_gain 2.5 \
+  --policy_frequency 100 --render_interval 0 --arm_sink mock
+
+# 真机（确认 mock 无误后再跑）：
+python deploy_real/server_low_level_g1_sim.py \
+  --xml assets/g1/g1_sim2sim_29dof.xml \
+  --policy assets/ckpts/twist2_1017_20k.onnx \
+  --device cpu --fix_feet --arm_pd_gain 2.5 \
+  --policy_frequency 100 --render_interval 0 \
+  --arm_sink real --arm_iface enp4s0
+```
+
+启动后期望日志：
+
+```text
+ONNX policy loaded from ... (providers: ['CPUExecutionProvider'])
+[Fix Feet] Injected <weld> constraint: pelvis -> world
+[PD] arm stiffness/damping scaled x2.5: shoulder 100/12.5, elbow 100/12.5, wrist 10.0/0.50
+  ArmSink: real (started)
+Simulating TWIST2...
+```
+
+也可用 `bash sim2sim.sh --mode fix_feet`（已默认带 `--arm_pd_gain 2.5`），
+再透传 `--arm_sink real --arm_iface enp4s0`。
+
+### 6.5 注意事项
+
+- **本体状态开环**：策略观测里的 `dof_pos/dof_vel/quat/ang_vel` 来自 MuJoCo 仿真，
+  不是真机 lowstate（"仿真闭环、真机开环"）。真机手臂实际跟踪误差不会回灌给策略。
+- **首次真机务必 mock → 小幅度实机**，同事扶臂，逐步加大幅度。
+- **`--arm_pd_gain`** 只影响 MuJoCo 仿真内 PD，不影响真机 SDK 增益（真机增益由
+  `g1_arm_controller.py` 固定：肩/肘 kp=80、腕 kp=40）。手臂抬不起→加大（步长 0.5，
+  上限约 4.0 易振荡）；到位后高频抖→减小。
+- **真机速度限幅**：`G1ArmController` 默认 `velocity_limit=30 rad/s` 偏宽松；
+  首测可在构造时调低，或改 `server_low_level_g1_sim.py` 的 `--arm_sink real` 分支。
+- **限位钳位**：`Twist2ArmSink` 支持从 `assets/g1/g1_29dof_rev_1_0.urdf` 读 14 臂关节
+  soft limit 钳位（构造时传 `urdf_path=`）。注意：当前 `server_low_level_g1_sim.py`
+  构造 `Twist2ArmSink(ctrl, verbose=True)` **未传 urdf_path**，即默认无限位钳位；
+  真机使用前建议补传该参数（安全相关）。
+- **结束 session**：Ctrl+C 终端 2 会 `finally` 触发 `G1ArmController.stop()`，
+  2 秒内平滑把 `arm_weight` 降到 0 释放手臂；再退出臂控模式、最后关终端 1。
+  控制器运行中不要直接关机器人电源。

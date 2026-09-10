@@ -32,6 +32,7 @@ By Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo Kanazawa†, Rocky Duan†, Piet
 | Smallplayer708/TWIST2（fix_feet 系列） | `--fix_feet`（焊死 pelvis→world + 腿/躯干动作置零）、`--redis_verify`、`--fixed_lower_body`、`--fixed_arm`、`--arm_smooth_alpha`、`--hand_step` |
 | 本地腿部跟踪改进 | `--leg_pd_gain`、`--leg_ema_alpha`、`--render_interval`、`--yaw_gain`、`--xy_gain`、`--leg_smooth_alpha`、朝向对齐、`--retarget_damping`、solver→Newton（详见 `doc/LEG_TRACKING_IMPROVEMENTS.md`） |
 | 对比工具 | `deploy_real/compare_tools/`（遥操作 vs sim2sim 状态发布到 Redis 对比）、`run_bridge.sh` |
+| 真机双臂桥接（g1_teleop_handoff） | `--arm_sink mock/real`、`--arm_iface`、`--arm_pd_gain`，把策略双臂输出 `pd_target[15:29]` 经 `G1ArmController` 通过 `rt/arm_sdk` 驱动真机（详见下节） |
 
 ## 使用方法
 
@@ -56,6 +57,52 @@ bash sim2sim.sh --mode fix_feet  # 终端 2
 
 其余参数（如 `--device`、`--leg_pd_gain`）可直接透传覆盖，例如
 `bash sim2sim.sh --mode tuned --leg_pd_gain 2.5`。
+
+## 真机双臂桥接（g1_teleop_handoff）
+
+`--mode fix_feet` 除了仿真，还能把策略输出的双臂 14D 关节角（`pd_target[15:29]`）
+经 `g1_teleop_handoff`（`/home/user/g1_teleop_handoff`）的 `G1ArmController` 通过
+`rt/arm_sdk`（DDS）直接驱动 Unitree G1 真机双臂，实现「锁下肢、双臂遥操作」。
+详细数据流与注意事项见 `doc/LEG_TRACKING_IMPROVEMENTS.md` §6 及 g1_teleop_handoff 的 README §7。
+
+前置条件：
+
+- g1_teleop_handoff 位于 `/home/user/g1_teleop_handoff`（`server_low_level_g1_sim.py`
+  已硬编码此路径，换位置需同步改其中的 `sys.path.insert`）。
+- `gmr` 环境额外装真机 SDK（版本需与 G1 固件匹配，本项目机验证
+  `unitree_sdk2py==1.0.1`、`cyclonedds==0.10.2`），见 g1_teleop_handoff README §7.1。
+- 真机已进入臂控模式（本项目机实测 `R2+A` → `fsm_id=802`），网线连通
+  （参考 `enp4s0` / PC `192.168.123.200` / G1 `192.168.123.164`）。
+
+```bash
+# 0) 真机预检（每次上电必做）
+cd /home/user/g1_teleop_handoff
+./scripts/start_g1_check.sh enp4s0 192.168.123.164
+
+# 1) 终端 1：PICO 遥操作 retarget（锁下肢仅手臂）
+cd /home/user/TWIST2 && conda activate gmr
+bash teleop.sh --mode fix_feet
+
+# 2) 终端 2：sim2sim 策略 + 真机桥接
+cd /home/user/TWIST2 && conda activate gmr
+# 先 mock 联调（无真机，验证链路）：
+python deploy_real/server_low_level_g1_sim.py \
+  --xml assets/g1/g1_sim2sim_29dof.xml \
+  --policy assets/ckpts/twist2_1017_20k.onnx \
+  --device cpu --fix_feet --arm_pd_gain 2.5 \
+  --policy_frequency 100 --render_interval 0 --arm_sink mock
+
+# 真机（确认 mock 无误后再跑）：
+python deploy_real/server_low_level_g1_sim.py \
+  --xml assets/g1/g1_sim2sim_29dof.xml \
+  --policy assets/ckpts/twist2_1017_20k.onnx \
+  --device cpu --fix_feet --arm_pd_gain 2.5 \
+  --policy_frequency 100 --render_interval 0 \
+  --arm_sink real --arm_iface enp4s0
+```
+
+也可用 `bash sim2sim.sh --mode fix_feet`（已默认带 `--arm_pd_gain 2.5`），
+再追加 `--arm_sink real --arm_iface enp4s0` 透传。
 
 ---
 
