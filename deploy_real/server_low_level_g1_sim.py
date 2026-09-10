@@ -587,6 +587,10 @@ def main():
             ctrl = MockG1ArmController()
         else:
             from g1_control import G1ArmController
+            if G1ArmController is None:
+                print("Error: G1ArmController unavailable — unitree_sdk2py/cyclonedds "
+                      "not installed in this env. See g1_teleop_handoff README §7.1.")
+                return
             ctrl = G1ArmController(args.arm_iface)
         arm_sink = Twist2ArmSink(ctrl, urdf_path=args.arm_urdf, verbose=True)
         arm_sink.open()
