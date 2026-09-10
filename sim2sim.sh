@@ -3,7 +3,7 @@
 #
 # Modes (via --mode):
 #   free      upstream behaviour: policy 100Hz, no leg tuning, no lower-body lock
-#   fix_feet  arm-only: weld pelvis to world + zero leg/torso actions (100Hz)
+#   fix_feet  arm-only: weld pelvis + zero leg/torso + stiffer arms (x2.5 PD)
 #   tuned     leg-tracking improvements: 50Hz + render_interval + leg_pd_gain + leg_ema
 #
 # Usage:
@@ -49,7 +49,7 @@ case "${MODE}" in
         ;;
     fix_feet)
         POLICY_FREQ=100
-        MODE_ARGS=(--fix_feet)
+        MODE_ARGS=(--fix_feet --arm_pd_gain 2.5)
         ;;
     tuned)
         POLICY_FREQ=50

@@ -83,7 +83,9 @@ class RealTimePolicyController:
                  render_interval=2,
                  leg_pd_gain=1.0,
                  leg_ema_alpha=0.0,
+                 arm_pd_gain=1.0,
                  fix_feet=False,
+                 arm_sink=None,
                  ):
         self.measure_fps = measure_fps
         self.limit_fps = limit_fps
@@ -98,6 +100,7 @@ class RealTimePolicyController:
         self.device = device
         self.policy = load_onnx_policy(policy_path, device)
         self.fix_feet = fix_feet
+        self.arm_sink = arm_sink
 
         # Create MuJoCo sim
         if self.fix_feet:
@@ -162,18 +165,8 @@ class RealTimePolicyController:
 
         # Compensate the MuJoCo-soft-contact execution decay on the loaded legs:
         # open-loop tests showed leg tracking RMSE 6.45 -> 4.38 deg at gain 2.0.
-        # Arms are unchanged (no ground contact, tracking is already good).
-        self.leg_pd_gain = leg_pd_gain
-        self.leg_ema_alpha = leg_ema_alpha
-        leg_idx = list(range(12))
-        self.stiffness[leg_idx] *= self.leg_pd_gain
-        self.damping[leg_idx] *= self.leg_pd_gain
-        print(f"[PD] leg stiffness/damping scaled x{self.leg_pd_gain}: "
-              f"hip {self.stiffness[0]:.0f}/{self.damping[0]:.1f}, "
-              f"knee {self.stiffness[3]:.0f}/{self.damping[3]:.1f}, "
-              f"ankle {self.stiffness[4]:.0f}/{self.damping[4]:.1f}")
-
-        
+        # For fix_feet (arm-only), arms carry the full tracking load; --arm_pd_gain
+        # lets us stiffen shoulders/elbows/wrists without retraining.
         self.torque_limits = np.array([
                 100, 100, 100, 150, 40, 40,
                 100, 100, 100, 150, 40, 40,
@@ -181,6 +174,26 @@ class RealTimePolicyController:
                 40, 40, 40, 40, 4.0, 4.0, 4.0,
                 40, 40, 40, 40, 4.0, 4.0, 4.0,
             ])
+
+        self.leg_pd_gain = leg_pd_gain
+        self.leg_ema_alpha = leg_ema_alpha
+        self.arm_pd_gain = arm_pd_gain
+        leg_idx = list(range(12))
+        self.stiffness[leg_idx] *= self.leg_pd_gain
+        self.damping[leg_idx] *= self.leg_pd_gain
+        self.torque_limits[leg_idx] *= self.leg_pd_gain
+        print(f"[PD] leg stiffness/damping scaled x{self.leg_pd_gain}: "
+              f"hip {self.stiffness[0]:.0f}/{self.damping[0]:.1f}, "
+              f"knee {self.stiffness[3]:.0f}/{self.damping[3]:.1f}, "
+              f"ankle {self.stiffness[4]:.0f}/{self.damping[4]:.1f}")
+        arm_idx = list(range(15, 29))
+        self.stiffness[arm_idx] *= self.arm_pd_gain
+        self.damping[arm_idx] *= self.arm_pd_gain
+        self.torque_limits[arm_idx] *= self.arm_pd_gain
+        print(f"[PD] arm stiffness/damping scaled x{self.arm_pd_gain}: "
+              f"shoulder {self.stiffness[15]:.0f}/{self.damping[15]:.1f}, "
+              f"elbow {self.stiffness[18]:.0f}/{self.damping[18]:.1f}, "
+              f"wrist {self.stiffness[19]:.1f}/{self.damping[19]:.2f}")
 
         self.action_scale = np.array([
                 0.5, 0.5, 0.5, 0.5, 0.5, 0.5,
@@ -401,6 +414,9 @@ class RealTimePolicyController:
                                            + (1.0 - self.leg_ema_alpha) * pd_target[0:12])
                     self.last_pd_target = pd_target
 
+                    if self.arm_sink is not None:
+                        self.arm_sink.send(pd_target)
+
                     # self.redis_client.set("action_low_level_unitree_g1", json.dumps(raw_action.tolist()))
                     
                     # Update camera to follow pelvis. Render every render_interval
@@ -482,8 +498,17 @@ def main():
     parser.add_argument("--render_interval", help="Render every N policy steps (2=25Hz visual, 1=50Hz visual, 0=never). Higher = less control jitter", default=2, type=int)
     parser.add_argument("--leg_pd_gain", help="Scale leg (12 joints) stiffness+damping to compensate MuJoCo soft-contact decay (2.0 recommended)", default=1.0, type=float)
     parser.add_argument("--leg_ema_alpha", help="EMA smoothing factor for leg (12 joints) PD targets (0=off, 0.5~0.7 recommended)", default=0.0, type=float)
+    parser.add_argument("--arm_pd_gain", help="Scale arm (14 joints) stiffness+damping+torque limit for fix_feet tracking (try 2.0~3.0 for stiffer arms)", default=1.0, type=float)
     parser.add_argument("--fix_feet", action="store_true", default=False,
                         help="Weld pelvis to world and zero leg+torso actions (arm-only sim)")
+    parser.add_argument("--arm_sink", choices=['mock', 'real'], default=None,
+                        help="Forward arm pd_target[15:29] to g1_teleop_handoff SDK controller")
+    parser.add_argument("--arm_iface", default='enp4s0',
+                        help="Network interface for real G1ArmController (--arm_sink real)")
+    parser.add_argument("--handoff_path", default=os.path.expanduser('~/g1_teleop_handoff'),
+                        help="Path to g1_teleop_handoff project (contains g1_control/ and examples/)")
+    parser.add_argument("--arm_urdf", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'g1', 'g1_29dof_rev_1_0.urdf'),
+                        help="URDF for 14D arm joint soft-limit clamping (Twist2ArmSink)")
     parser.add_argument("--redis_verify", action="store_true",
                         help="Only check Redis for mimic_obs data and exit (no simulation)")
     args = parser.parse_args()
@@ -546,6 +571,27 @@ def main():
     print(f"  Measure FPS: {args.measure_fps}")
     print(f"  Limit FPS: {args.limit_fps}")
     print(f"  Fix Feet: {args.fix_feet}")
+
+    arm_sink = None
+    if args.arm_sink in ('mock', 'real'):
+        import sys
+        handoff_path = os.path.expanduser(args.handoff_path)
+        if not os.path.isdir(handoff_path):
+            print(f"Error: g1_teleop_handoff not found at {handoff_path}. "
+                  f"Pass --handoff_path <dir>.")
+            return
+        sys.path.insert(0, handoff_path)
+        from g1_control import MockG1ArmController
+        from examples.twist2_arm_sink import Twist2ArmSink
+        if args.arm_sink == 'mock':
+            ctrl = MockG1ArmController()
+        else:
+            from g1_control import G1ArmController
+            ctrl = G1ArmController(args.arm_iface)
+        arm_sink = Twist2ArmSink(ctrl, urdf_path=args.arm_urdf, verbose=True)
+        arm_sink.open()
+        print(f"  ArmSink: {args.arm_sink} (started)")
+
     controller = RealTimePolicyController(
         xml_file=args.xml,
         policy_path=args.policy,
@@ -558,9 +604,16 @@ def main():
         render_interval=args.render_interval,
         leg_pd_gain=args.leg_pd_gain,
         leg_ema_alpha=args.leg_ema_alpha,
+        arm_pd_gain=args.arm_pd_gain,
         fix_feet=args.fix_feet,
+        arm_sink=arm_sink,
     )
-    controller.run()
+    try:
+        controller.run()
+    finally:
+        if arm_sink is not None:
+            arm_sink.close()
+            print("  ArmSink: stopped")
 
 
 if __name__ == "__main__":
