@@ -1,6 +1,6 @@
 # TWIST2: Scalable, Portable, and Holistic Humanoid Data Collection System
-By Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo Kanazawa†, Rocky Duan†, Pieter Abbeel†, Guanya Shi†, Jiajun Wu†, C. Karen Liu†, 2025 († Equal Advising)
 
+By Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo Kanazawa†, Rocky Duan†, Pieter Abbeel†, Guanya Shi†, Jiajun Wu†, C. Karen Liu†, 2025 († Equal Advising)
 
 [[Website]](https://yanjieze.com/TWIST2)
 [[arXiv]](https://arxiv.org/abs/2511.02832)
@@ -8,18 +8,15 @@ By Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo Kanazawa†, Rocky Duan†, Piet
 
 ![Banner for TWIST](./assets/TWIST2.png)
 
-
 # News
+
 - **2025-12-02**. 1st successfuly reproducing of TWIST2 appears. Check [his bilibili video](https://www.bilibili.com/video/BV1UbSeBNETw/?share_source=copy_web&vd_source=c76e3ab14ac3f7219a9006b96b4b0f76)
 - **2025-12-02**. I will give a video tutorial for TWIST2 next week to show you how to use TWIST2. Please stay tuned.
 - **2025-12-02**. TWIST2 is open-sourced now. Give it a star on GitHub!
-   - Disclamer 1: with current repo, you should be able to control Unitree G1 via cable connection in both sim and real with a PICO VR headset. 
-   - Disclamer 2: I am still working on better documentation and cleaning some onboard streaming and inference code (as the teleop pipeline is complex and requires some hardware setup). Please stay tuned.
-   - Disclamer 3: The high-level policy learning part will be released in a separate repo. It is modifed from [iDP3](https://github.com/YanjieZe/Improved-3D-Diffusion-Policy) and I am working on releasing it soon.
+  - Disclamer 1: with current repo, you should be able to control Unitree G1 via cable connection in both sim and real with a PICO VR headset.
+  - Disclamer 2: I am still working on better documentation and cleaning some onboard streaming and inference code (as the teleop pipeline is complex and requires some hardware setup). Please stay tuned.
+  - Disclamer 3: The high-level policy learning part will be released in a separate repo. It is modifed from [iDP3](https://github.com/YanjieZe/Improved-3D-Diffusion-Policy) and I am working on releasing it soon.
 - **2025-11-05**. TWIST2 is released. Full code will be released within 1 month (mostly ready and under the internal process). Please stay tuned.
-
-
-
 
 # 本仓库改动与模式切换
 
@@ -27,12 +24,12 @@ By Yanjie Ze, Siheng Zhao, Weizhuo Wang, Angjoo Kanazawa†, Rocky Duan†, Piet
 
 ## 项目内容
 
-| 来源 | 改动 |
-|---|---|
-| Smallplayer708/TWIST2（fix_feet 系列） | `--fix_feet`（焊死 pelvis→world + 腿/躯干动作置零）、`--redis_verify`、`--fixed_lower_body`、`--fixed_arm`、`--arm_smooth_alpha`、`--hand_step` |
-| 本地腿部跟踪改进 | `--leg_pd_gain`、`--leg_ema_alpha`、`--render_interval`、`--yaw_gain`、`--xy_gain`、`--leg_smooth_alpha`、朝向对齐、`--retarget_damping`、solver→Newton（详见 `doc/LEG_TRACKING_IMPROVEMENTS.md`） |
-| 对比工具 | `deploy_real/compare_tools/`（遥操作 vs sim2sim 状态发布到 Redis 对比）、`run_bridge.sh` |
-| 真机双臂桥接（g1_teleop_handoff） | `--arm_sink mock/real`、`--arm_iface`、`--arm_pd_gain`，把策略双臂输出 `pd_target[15:29]` 经 `G1ArmController` 通过 `rt/arm_sdk` 驱动真机（详见下节） |
+| 来源                                   | 改动                                                                                                                                                                                                                |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Smallplayer708/TWIST2（fix_feet 系列） | `--fix_feet`（焊死 pelvis→world + 腿/躯干动作置零）、`--redis_verify`、`--fixed_lower_body`、`--fixed_arm`、`--arm_smooth_alpha`、`--hand_step`                                                        |
+| 本地腿部跟踪改进                       | `--leg_pd_gain`、`--leg_ema_alpha`、`--render_interval`、`--yaw_gain`、`--xy_gain`、`--leg_smooth_alpha`、朝向对齐、`--retarget_damping`、solver→Newton（详见 `doc/LEG_TRACKING_IMPROVEMENTS.md`） |
+| 对比工具                               | `deploy_real/compare_tools/`（遥操作 vs sim2sim 状态发布到 Redis 对比）、`run_bridge.sh`                                                                                                                        |
+| 真机双臂桥接（g1_teleop_handoff）      | `--arm_sink mock/real`、`--arm_iface`、`--arm_pd_gain`，把策略双臂输出 `pd_target[15:29]` 经 `G1ArmController` 通过 `rt/arm_sdk` 驱动真机（详见下节）                                                   |
 
 ## 使用方法
 
@@ -115,11 +112,12 @@ python deploy_real/server_low_level_g1_sim.py \
 - [本仓库改动与模式切换](#本仓库改动与模式切换)
 - [Citation and Contact](#citation-and-contact)
 
-
 # Installation
+
 We will have two conda environments for TWIST2. One is called `twist2`, which can be used for controller training, controller deployment, and teleop data collection. The other is called `gmr`, which can be used for online motion retargeting. This is because isaacgym requires python 3.8, but newest mujoco requires python 3.10.
 
 **1**. Create conda environment:
+
 ```bash
 conda env remove -n twist2
 conda create -n twist2 python=3.8
@@ -127,11 +125,13 @@ conda activate twist2
 ```
 
 **2**. Install isaacgym. Download from [official link](https://developer.nvidia.com/isaac-gym) and then install it:
+
 ```bash
 cd isaacgym/python && pip install -e .
 ```
 
 **3**. Install packages:
+
 ```bash
 cd rsl_rl && pip install -e . && cd ..
 cd legged_gym && pip install -e . && cd ..
@@ -144,6 +144,7 @@ pip install customtkinter # for gui
 ```
 
 if this is your first time to use redis, install and start redis server:
+
 ```bash
 # sudo apt install redis-server
 # redis-server --daemonize yes
@@ -156,23 +157,26 @@ sudo systemctl start redis-server
 ```
 
 edit `/etc/redis/redis.conf`:
+
 ```bash
 sudo nano /etc/redis/redis.conf
 ```
 
 modify to the following lines:
+
 ```bash
 bind 0.0.0.0
 protected-mode no
 ```
 
 then restart redis-server:
+
 ```bash
 sudo systemctl restart redis-server
 ```
 
-
 **4**. if you wanna do sim2real with laptop, you also need to install my modified version of unitree sdk [here](https://github.com/YanjieZe/unitree_sdk2/tree/main/python_binding). (if you wanna do sim2real with onboard robot computer, no need to install unitree sdk on your laptop.)
+
 ```bash
 # Clone the Unitree SDK2 repository
 cd ..
@@ -206,15 +210,14 @@ python -c "import unitree_interface; print('Available robot types:', list(unitre
 cd ../..
 ```
 
-
 **4**. [If you want to train your own controller, download data; otherwise, skip this step] Download TWIST2 dataset from [my google drive](https://drive.google.com/file/d/1JbW_InVD0ji5fvsR5kz7nbsXSXZQQXpd/view?usp=sharing) [Small note: if you use this dataset in your project, please also add proper citation to this work]. Unzip it to anywhere you like, and specify the `root_path` in `legged_gym/motion_data_configs/twist2_dataset.yaml` to the unzipped folder.
 
 **Note**: we also provide a small set of example motions in `assets/example_motions`. You can use them to test the system. It is recorded by myself so no license issue.
 
 **Note**: We also provide our controller ckpt `assets/ckpts/twist2_1017_20k.onnx` for you to test the system directly.
 
-
 **5**. Install GMR for online retargeting and teleop. We use a separate conda environment for GMR/online retargeting due to requiring python 3.10+.
+
 ```bash
 conda create -n gmr python=3.10 -y
 conda activate gmr
@@ -232,83 +235,92 @@ conda install -c conda-forge libstdcxx-ng -y
 ```
 
 **6**. Install PICO SDK:
+
 1. On your PICO, install PICO SDK: see [here](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/releases/).
-2. On your own PC, 
-    - Download [deb package for ubuntu 22.04](https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases/download/v1.0.0/XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb), or build from the [repo source](https://github.com/XR-Robotics/XRoboToolkit-PC-Service).
-    - To install, use command
-        ```bash
-        sudo dpkg -i XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
-        ```
-        then you should see `xrobotoolkit-pc-service` in your APPs. remember to start this app before you do teleopperation.
-    - Build PICO PC Service SDK and Python SDK for PICO streaming:
-        ```bash
-        conda activate gmr
+2. On your own PC,
+   - Download [deb package for ubuntu 22.04](https://github.com/XR-Robotics/XRoboToolkit-PC-Service/releases/download/v1.0.0/XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb), or build from the [repo source](https://github.com/XR-Robotics/XRoboToolkit-PC-Service).
+   - To install, use command
+     ```bash
+     sudo dpkg -i XRoboToolkit_PC_Service_1.0.0_ubuntu_22.04_amd64.deb
+     ```
 
-        git clone https://github.com/YanjieZe/XRoboToolkit-PC-Service-Pybind.git
-        cd XRoboToolkit-PC-Service-Pybind
+     then you should see `xrobotoolkit-pc-service` in your APPs. remember to start this app before you do teleopperation.
+   - Build PICO PC Service SDK and Python SDK for PICO streaming:
+     ```bash
+     conda activate gmr
 
-        mkdir -p tmp
-        cd tmp
-        git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
-        cd XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK 
-        bash build.sh
-        cd ../../../..
-        
+     git clone https://github.com/YanjieZe/XRoboToolkit-PC-Service-Pybind.git
+     cd XRoboToolkit-PC-Service-Pybind
 
-        mkdir -p lib
-        mkdir -p include
-        cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/PXREARobotSDK.h include/
-        cp -r tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/nlohmann include/nlohmann/
-        cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/build/libPXREARobotSDK.so lib/
-        # rm -rf tmp
+     mkdir -p tmp
+     cd tmp
+     git clone https://github.com/XR-Robotics/XRoboToolkit-PC-Service.git
+     cd XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK 
+     bash build.sh
+     cd ../../../..
 
-        # Build the project
-        conda install -c conda-forge pybind11
-        pip uninstall -y xrobotoolkit_sdk
-        python setup.py install
-        ```
 
+     mkdir -p lib
+     mkdir -p include
+     cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/PXREARobotSDK.h include/
+     cp -r tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/nlohmann include/nlohmann/
+     cp tmp/XRoboToolkit-PC-Service/RoboticsService/PXREARobotSDK/build/libPXREARobotSDK.so lib/
+     # rm -rf tmp
+
+     # Build the project
+     conda install -c conda-forge pybind11
+     pip uninstall -y xrobotoolkit_sdk
+     python setup.py install
+     ```
 
 **7**. Ready for training & deployment!
 
 # Usage
+
 We have provided the trained student ckpt in `assets/ckpts/twist2_1017_20k.onnx`. You can directly use it for deployment. If you want to deploy our ckpt directly, go to **4** directly.
 
 And we have also provided full motion datasets to ensure you can successfully train our teacher & student policy.
 
-
 **1**. Training TWIST2 general motion tracker:
+
 ```bash
 bash train.sh 1021_twist2 cuda:0
 ```
+
 - arg 1: policy expid
 - arg 2: cuda device id
 
 **2**. Export policy to onnx model:
+
 ```bash
 bash to_onnx.sh $YOUR_POLICY_PATH
 ```
-- arg 1: your policy path. you should find the `.pt` file's path.
 
+- arg 1: your policy path. you should find the `.pt` file's path.
 
 **3**. Sim2sim verification:
 
 [If this is your first time to run this script] you need to warm up the redis server by running the high-level motion server.
+
 ```bash
 bash run_motion_server.sh
 ```
+
 You can also just select one motion file from our motion dataset by modifying the `motion_file` in `run_motion_server.sh`.
 
 Then, you can run the low-level controller server in simulation.
+
 ```bash
 bash sim2sim.sh
 ```
+
 - 可选 `--mode free|fix_feet|tuned` 切换模式，见[本仓库改动与模式切换](#本仓库改动与模式切换)。
 - This will start a simulation that runs the low-level controller only.
 - This is because we separate the high-level control (i.e., teleop) from the low-level control (i.e., RL policy).
 - You should now be able to see the robot stand still. The robot is standing still because we make redis server send stand pose by default.
 
 You can also see the policy execution FPS in the terminal. It should be around 50 Hz. If your laptop's GPU/CPU is not strong enough, the FPS may be lower and hurts the policy execution.
+
 ```bash
 === Policy Execution FPS Results (steps 1-1000) ===
 Average Policy FPS: 38.88
@@ -325,54 +337,58 @@ And now you can control the robot via high-level motion streaming.
 We have provided two choices for you:
 
 1) for offline motion streaming:
+
 ```bash
 bash run_motion_server.sh
 ```
 
-
 2) for online PICO teleop:
+
 ```bash
 bash teleop.sh
 ```
+
 - 可选 `--mode free|fix_feet|tuned` 切换模式，见[本仓库改动与模式切换](#本仓库改动与模式切换)。
-
-
-
- 
 
 **4**. Sim2real verification. If you are not familiar with the deployment on physical robot, you can refer to [unitree_g1.md](./unitree_g1.md) or [unitree_g1.zh.md](./unitree_g1.zh.md) for more details.
 
 More specifically, the pipeline for sim2real deploy is:
+
 1. start the robot and connect the robot and your laptop via an Ethernet cable.
 2. config the corresponding net interface on your laptop, by setting the IP address as `192.168.123.222` and the netmask as `255.255.255.0`.
 3. now you should be able to ping the robot via `ping 192.168.123.164`.
 4. then use Unitree G1's remote control to enter dev mode, i.e., press the `L2+R2` key combination.
 5. now you should be able to see the robot joints in the damping state.
 6. then you can run the low-level controller by:
+
 ```bash
 bash sim2real.sh
 ```
+
 - please set the network interface name to your own that connects to the robot in `sim2real.sh`.
 
-
-
-
 Similarly, you run the low-level controller first and then control the robot via high-level motion server, i.e.,
+
 1) offline motion streaming:
+
 ```bash
 bash run_motion_server.sh
 ```
+
 2) or online PICO teleop:
+
 ```bash
 bash teleop.sh
 ```
 
-
 **5**. GUI interface for everything. Check `gui.sh` for more details.
+
 ```bash
 bash gui.sh
 ```
+
 You should be able to
+
 1) run the low-level controller in simulation
 2) run the low-level controller on physical robot
 3) run the high-level motion streaming in offline mode
@@ -380,11 +396,12 @@ You should be able to
 5) run the data collection script
 6) run the neck controller script
 7) run the ZED streaming script
-all in this GUI. This GUI is also what I use for data collection and teleoperation.
-
+   all in this GUI. This GUI is also what I use for data collection and teleoperation.
 
 # Citation and Contact
+
 If you find this work useful, please cite:
+
 ```bibtex
 @article{ze2025twist2,
 title={TWIST2: Scalable, Portable, and Holistic Humanoid Data Collection System},
@@ -393,7 +410,9 @@ year= {2025},
 journal= {arXiv preprint arXiv:2511.02832}
 }
 ```
+
 And also consider citing the related works:
+
 ```bibtex
 @article{ze2025twist,
 title={TWIST: Teleoperated Whole-Body Imitation System},
@@ -409,8 +428,9 @@ year= {2025},
 journal= {arXiv preprint arXiv:2510.02252}
 }
 ```
+
 If you have any questions, please contact me at `yanjieze@stanford.edu`.
 
-
 # Acknowledgments
+
 We use [AMASS](https://amass.is.tue.mpg.de/) and [OMOMO](https://arxiv.org/abs/2309.16237) motion datasets for research purposes only. Our code is built upon the [TWIST](https://github.com/YanjieZe/TWIST) repository.

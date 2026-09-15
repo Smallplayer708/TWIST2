@@ -101,7 +101,9 @@ class RealTimePolicyController(object):
                  net='eno1',
                  use_hand=False,
                  record_proprio=False,
-                 smooth_body=0.0):
+                 smooth_body=0.0,
+                 leg_ema_alpha=0.0,
+                 leg_pd_gain=1.0):
         self.redis_client = None
         try:
             self.redis_client = redis.Redis(host='localhost', port=6379, db=0)
@@ -162,6 +164,18 @@ class RealTimePolicyController(object):
             print(f"Body action smoothing enabled with alpha={smooth_body}")
         else:
             self.body_smoother = None
+
+        # Leg-specific tuning (ported from the sim path):
+        #   leg_ema_alpha : EMA low-pass on the 12 leg PD targets (0=off, 0.5~0.7)
+        #   leg_pd_gain   : scale the 12 leg joints' kp/kd (>1 = stiffer/damped)
+        self.leg_ema_alpha = leg_ema_alpha
+        self.leg_pd_gain = leg_pd_gain
+        self.last_pd_target = self.default_dof_pos.copy()
+        if leg_ema_alpha > 0.0 or leg_pd_gain != 1.0:
+            print(
+                f"Leg tuning enabled: leg_ema_alpha={leg_ema_alpha}, "
+                f"leg_pd_gain={leg_pd_gain}"
+            )
 
         
     def reset_robot(self):
@@ -271,11 +285,21 @@ class RealTimePolicyController(object):
                 raw_action = np.clip(raw_action, -10.0, 10.0)
                 target_dof_pos = self.default_dof_pos + raw_action * self.action_scale
 
+                # Leg PD target low-pass (EMA): attenuate high-freq leg jitter
+                # while leaving arms/waist untouched.
+                if self.leg_ema_alpha > 0.0:
+                    target_dof_pos[:12] = (
+                        self.leg_ema_alpha * self.last_pd_target[:12]
+                        + (1.0 - self.leg_ema_alpha) * target_dof_pos[:12]
+                    )
+                self.last_pd_target = target_dof_pos.copy()
+
                 # self.redis_client.set("action_low_level_unitree_g1", json.dumps(raw_action.tolist()))
 
-                kp_scale = 1.0
-                kd_scale = 1.0
-                self.env.send_robot_action(target_dof_pos, kp_scale, kd_scale)
+                # Leg PD gain boost (per-joint): scale the 12 leg joints' kp/kd.
+                pd_scale = np.ones(self.num_actions, dtype=np.float64)
+                pd_scale[:12] = self.leg_pd_gain
+                self.env.send_robot_action(target_dof_pos, pd_scale, pd_scale)
                 
                 if self.use_hand:
                     self.hand_ctrl.ctrl_dual_hand(action_hand_left, action_hand_right)
@@ -338,6 +362,10 @@ def main():
                         help='Record proprioceptive data')
     parser.add_argument('--smooth_body', type=float, default=0.0,
                         help='Smoothing factor for body actions (0.0=no smoothing, 1.0=maximum smoothing)')
+    parser.add_argument('--leg_ema_alpha', type=float, default=0.0,
+                        help='EMA low-pass on the 12 leg PD targets (0=off, 0.5~0.7 recommended)')
+    parser.add_argument('--leg_pd_gain', type=float, default=1.0,
+                        help='Scale the 12 leg joints kp/kd (1.0=off, try 1.5~2.0)')
     
     args = parser.parse_args()
 
@@ -377,6 +405,8 @@ def main():
         use_hand=args.use_hand,
         record_proprio=args.record_proprio,
         smooth_body=args.smooth_body,
+        leg_ema_alpha=args.leg_ema_alpha,
+        leg_pd_gain=args.leg_pd_gain,
     )
     
     controller.run()

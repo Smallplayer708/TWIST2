@@ -140,8 +140,17 @@ class G1RealWorldEnv:
         
         cmd.q_target = target_dof_pos.copy()
         cmd.dq_target = np.zeros_like(target_dof_pos)
-        kps = [self.config.kps[i] * kp_scale for i in range(len(self.config.kps))]
-        kds = [self.config.kds[i] * kd_scale for i in range(len(self.config.kds))]
+        # kp_scale / kd_scale may be a scalar (uniform) or a per-joint array.
+        kp_scale = np.asarray(kp_scale, dtype=np.float64)
+        kd_scale = np.asarray(kd_scale, dtype=np.float64)
+        kps = [
+            self.config.kps[i] * (float(kp_scale) if kp_scale.ndim == 0 else kp_scale[i])
+            for i in range(len(self.config.kps))
+        ]
+        kds = [
+            self.config.kds[i] * (float(kd_scale) if kd_scale.ndim == 0 else kd_scale[i])
+            for i in range(len(self.config.kds))
+        ]
         cmd.kp = kps
         cmd.kd = kds
         cmd.tau_ff = np.zeros_like(target_dof_pos)

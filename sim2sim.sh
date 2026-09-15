@@ -53,7 +53,7 @@ case "${MODE}" in
         ;;
     tuned)
         POLICY_FREQ=50
-        MODE_ARGS=(--render_interval 2 --leg_pd_gain 2.0 --leg_ema_alpha 0.6)
+        MODE_ARGS=(--render_interval 1 --leg_pd_gain 1.0 --leg_ema_alpha 0.6)
         ;;
     *)
         echo "Error: unknown --mode '${MODE}' (use free|fix_feet|tuned)" >&2
